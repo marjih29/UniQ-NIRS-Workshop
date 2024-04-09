@@ -1,0 +1,474 @@
+---
+title: "UniQ NIRS Workshop"
+author: "Marjorie Hanneman"
+date: "2024-04-09"
+output: html_document
+---
+# ILCI NIRS Workshop 2024
+
+## This example code and analysis is made using Jenna Hershberger's waves package vignette.
+
+Hershberger, J, Morales, N, Simoes, CC, Ellerbrock, B, Bauchet, G,
+Mueller, LA, Gore MA. Making waves in Breedbase: An integrated spectral
+data storage and analysis pipeline for plant breeding programs. Plant
+Phenome J. 2021; 4:e20012. <https://doi.org/10.1002/ppj2.20012>
+
+### Originally designed application in the context of resource-limited plant research and breeding programs, waves provides an open-source solution to spectral data processing and model development by bringing useful packages together into a streamlined pipeline. This package is wrapper for functions related to the analysis of point visible and near-infrared reflectance measurements. It includes visualization, filtering, aggregation, pretreatment, cross-validation set formation, model training, and prediction functions to enable open-source association of spectral and reference data.
+
+# Install Packages
+
+This only needs to be installed once. If packages have already been
+installed, go to loading packages.
+
+```{r}
+install.packages("waves")
+install.packages("magrittr")
+install.packages("dplyr")
+install.packages("tidyr")
+install.packages("ggplot2")
+install.packages("tibble")
+```
+
+# Loading Packages
+
+```{r}
+library(waves)
+library(magrittr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(tibble)
+```
+
+For this workshop, we will be using ikeogu.2017 as are spectral data
+set. The data set is already loaded within the waves package for us to
+practice with.
+
+# Read in the Data
+
+```{r}
+ikeogu.2017.prepped <- read.csv("workshop_data_raw.csv")
+```
+
+Match spectra with reference values so that you have a data.frame with
+unique identifiers, reference values, and other metadata as columns to
+the left of spectral values. Spectral column names should start with
+"X". Remove rows with missing values.
+
+```{r}
+ikeogu.2017.prepped <- ikeogu.2017 %>%
+  dplyr::rename(unique.id = sample.id,
+                reference = DMC.oven) %>%
+  dplyr::select(unique.id, dplyr::everything(), -TCC) %>%
+  na.omit() 
+```
+
+In the above code chunk, we change the column names to unique.id and
+reference, and remove 'NAs'. This format will then be able to run
+through the next functions.
+
+*NOTE: The output of your spectrometer will not always match this
+example. Data will need to be cleaned to match this format. Examples
+from 3 other spectrometers will be shown during the workshop.*
+
+Let's look at the reformatted version:
+
+```{r}
+head(ikeogu.2017.prepped)
+```
+
+# Visualize Spectra
+
+Let's look at the spectra in our data set. We will use the
+`plot_spectra()` function.
+
+```{r}
+ikeogu.2017.prepped %>%
+  plot_spectra(
+    df = .,
+    num.col.before.spectra = 5,
+    detect.outliers = FALSE,
+    alternate.title = "Example spectra"
+  )
+```
+
+# Outlier Removal
+
+waves uses Mahalanobis distance to identify outliers. Mahalanobis
+distance is a common metric used to identify multivariate outliers. The
+larger the value of Mahalanobis distance, the more unusual the data
+point (i.e., the more likely it is to be a multivariate outlier).
+
+The distance tells us how far an observation is from the center of the
+cloud, taking into account the shape (covariance) of the cloud as well.
+
+To detect outliers, the calculated Mahalanobis distance is compared
+against a χ2 distribution with degrees of freedom equal to the number of
+spectral data columns and an alpha level of 0.05.
+
+```{r}
+filtered.df <- ikeogu.2017.prepped %>%
+  filter_spectra(
+    df = .,
+    filter = TRUE,
+    return.distances = TRUE,
+    num.col.before.spectra = 5,
+    window.size = 15
+    )
+
+filtered.df[1:5, c(1:5, (ncol(filtered.df) - 3):ncol(filtered.df))]
+```
+
+No outliers were identified in the example dataset. Note the if
+return.distances is set to TRUE, the rightmost column contains
+Mahalanobis distances (h.distances).
+
+# Aggregate Scans
+
+If you have more than one scan per unique identifier, aggregate the
+scans by mean or median with `aggregate_spectra().`
+
+This is helpful when a sample has been scanned multiple times. To ensure accurate readings, it is best to take 3-5 scans of the same sample. Here, we combine the reps into an average value for each wavelength.
+
+In this example, we will aggregate by study.name.
+
+```{r}
+aggregated.test <- ikeogu.2017.prepped %>%
+  aggregate_spectra(
+    grouping.colnames = c("study.name"),
+    reference.value.colname = "reference",
+    agg.function = "mean"
+    )
+aggregated.test[, 1:5]
+```
+
+# Pretreat Spectra
+
+Reducing noise that is inherent in the use of a spectrometer to allow better accuracy.
+
+Specify which spectral pretreatments (1-13) to apply with the parameter
+pretreatment. `pretreat_spectra()` can also be used on its own to
+transform a data.frame using any/all of 12 available pretreatments:
+
+1.  Raw data (no pretreatment is applied)
+
+2.  Standard normal variate (SNV)
+
+3.  SNV and first derivative
+
+4.  SNV and second derivative
+
+5.  First derivative
+
+6.  Second derivative
+
+7.  Savitzky--Golay filter (SG)
+
+8.  SNV and SG
+
+9.  Gap segment derivative (window size = 11)
+
+10. SG and first derivative (window size = 5)
+
+11. SG and first derivative (window size = 11)
+
+12. SG and second derivative (window size = 5)
+
+13. SG and second derivative (window size = 11)
+
+```{r}
+ikeogu.2017.prepped[1:10,] %>% # subset the first 10 scans for speed
+  pretreat_spectra(pretreatment = 1:2) %>% # raw data versus SNV pretreatment reduces noise
+  bind_rows(.id = "pretreatment") %>%
+  gather(key = "wl",
+         value = "s.value",
+         tidyselect::starts_with("X")) %>%
+  mutate(wl = as.numeric(readr::parse_number(.data$wl)),
+         pretreatment = as.factor(pretreatment)) %>%
+  drop_na(s.value) %>%
+  ggplot(data = ., aes(x = wl, y = s.value, group = unique.id)) +
+  geom_line(alpha = .5) +
+  theme(axis.text.x = element_text(angle = 45)) +
+  labs(title = "Pretreated spectra",
+       x = "Wavelength",
+       y = "Spectral Value") +
+  
+  facet_wrap( ~ pretreatment, scales = "free")
+```
+
+# Cross Validation
+
+Choose from random, stratified random, or a plant breeding-specific
+scheme from Jarquín et al., 2017. The Plant Genome. If `cv.scheme` is
+set to `NULL`, the argument `stratified.sampling` is used to determine
+whether stratified random sampling should be performed. If `TRUE`, the
+reference values from the input `data.frame (train.data)` will be used
+to create a balanced split of data between the training and test sets in
+each training iteration.
+
+Cross-validation schemes can also be formatted outside of
+`test_spectra()` using the function `format_cv()`
+
+# Evaluate Spectra
+
+`test_spectra()` is a wrapper that performs spectral pretreatment (5.1),
+cross-validation set formation (5.2), and model training functions over
+multiple iterations (5.3).
+
+Note that the following subsections describe functions that are called
+within `test_spectra()`. They do not need to be used separately for
+model pretreatment, cross-validation set formation, or model training.
+
+Some of the arguments for this function are detailed below. A
+description of output is below under section 5.4. See `?test_spectra()`
+for more information on the arguments and output for this function.
+
+```{r}
+results.list <- ikeogu.2017.prepped %>%
+ dplyr::select(unique.id, reference, dplyr::starts_with("X")) %>%
+ na.omit() %>%
+ test_spectra(
+   train.data = .,
+   tune.length = 3,
+   num.iterations = 3,
+   pretreatment = 1
+  )
+```
+
+# Output
+
+`test_spectra()` outputs a list with four objects. We will focus on two:
+
+
+1.  `predictions` is a `data.frame` containing both reference and
+    predicted values for each test set entry in each iteration of model
+    training.
+
+```{r}
+head(results.list$predictions)
+```
+
+2.  `summary.model.performance` is a `data.frame` containing summary
+    statistics across all model training iterations and pretreatments.
+    See below for a description of the summary statistics provided.
+
+```{r}
+results.list$summary.model.performance
+```
+
+# Model Methods
+Quantitative vs qualitative, update to waves package coming soon
+
+When using the test_spectra() function, you can choose between different model methods. The default is partial least squares regression. To implement a different model method, you can specify this with the "model.method" argument. The code below shows model training with two additional model methods: support vector machine and random forest.
+
+# Selecting the best model
+
+When picking the best model, the training and test set should be the same.
+
+Running all of these models will take too long for this workshop, so the output is listed below.
+
+```{}
+pls.results.list <- ikeogu.2017.prepped %>%
+ dplyr::select(unique.id, reference, dplyr::starts_with("X")) %>%
+ na.omit() %>%
+ test_spectra(
+   train.data = .,
+   tune.length = 3,
+   num.iterations = 3,
+   pretreatment = 1:13,
+   model.method = "pls"
+  )
+
+svm.results.list <- ikeogu.2017.prepped %>%
+ dplyr::select(unique.id, reference, dplyr::starts_with("X")) %>%
+ na.omit() %>%
+ test_spectra(
+   train.data = .,
+   tune.length = 3,
+   num.iterations = 3,
+   pretreatment = 1:13,
+   model.method = "svm"
+  )
+
+rf.results.list <- ikeogu.2017.prepped %>%
+ dplyr::select(unique.id, reference, dplyr::starts_with("X")) %>%
+ na.omit() %>%
+ test_spectra(
+   train.data = .,
+   tune.length = 3,
+   num.iterations = 3,
+   pretreatment = 1:13,
+   model.method = "rf"
+  )
+
+pls.results.list$summary.model.performance
+svm.results.list$summary.model.performance
+rf.results.list$summary.model.performance
+```
+
+
+Across pretreatments, the average RMSEs and R-squareds for each model method are as follows:
+
+pls: RMSE = 2.044, R-squared = 0.778
+
+svmLinear: RMSE = 1.425, R-squared = 0.887
+
+rf: RMSE = 2.119, R-squared = 0.750
+
+We can compare these metrics to select the best model method for our data. We want to minimize the RMSE and maximize the R-squared.
+
+# The svmLinear model performs the best!
+
+# Save trained prediction models
+
+-   Intended for a production environment
+
+-   Can evaluate spectral pretreatment methods using the input dataset
+
+-   Selects best model using the metric provided with
+    `best.model.metric` ("RMSE" or "Rsquared")
+
+-   Returns trained model with option to save as .Rds object
+
+-   The `$model` output from `test_spectra()` can also be saved and used
+    for prediction, but `save_model()` will take the extra step of
+    saving an .Rds file for you if `write.model` is set to `TRUE`.
+
+    In the example below, we'll use one subset of the example data set
+    ("C16Mcal") to create the model and then we'll predict the other
+    subset ("C16Mval") in section 7.
+
+    Circle back to training vs test set within the context of picking a
+    model.
+
+```{r}
+model.to.save <- ikeogu.2017.prepped %>%
+   dplyr::filter(study.name == "C16Mcal") %>%
+   dplyr::select(unique.id, reference, dplyr::starts_with("X")) %>%
+   na.omit() %>%
+   save_model(
+     df = .,
+     write.model = FALSE,
+     pretreatment = 1:13,
+     tune.length = 5,
+     num.iterations = 3,
+     verbose = FALSE
+   )
+```
+
+Let's look at the model:
+
+```{r}
+model.to.save$best.model.stats %>% 
+  gather(key = "statistic", value = "value", RMSEp_mean:best.mtry_mode) %>% 
+  separate(statistic, into =  c("statistic", "summary_type"), sep = "_") %>% 
+  pivot_wider(id_cols = c(Pretreatment, summary_type), 
+              names_from = statistic, values_from = value)
+```
+
+# Predict phenotypic values with new spectra
+
+If generating predictions from a saved model file in .Rds format, use
+`predict_spectra()`. If the model object is already in your R
+environment, the function `stats::predict()` can be used to generate
+predictions. `predict_spectra()` pulls the best model hyperparameters
+from your saved model object, but if using `stats::predict()`, these
+must be supplied separately.
+
+Using the model we trained in section 6, we can predict cassava root dry
+matter content for our held out validation set:
+
+First, determine which pretreatment generated the best model. In this
+case, it's "SNVSG", which is pretreatment #8. Pretreat the new spectral
+dataset with these spectra.
+
+```{r}
+pretreated.val <- ikeogu.2017.prepped %>% 
+  filter(study.name == "C16Mval") %>% 
+  pretreat_spectra(pretreatment = 8) 
+
+pretreated.val.mx <- pretreated.val %>% 
+  dplyr::select(starts_with("X")) %>% 
+  as.matrix()
+
+best.ncomp <- model.to.save$best.model.stats$best.ncomp_mode
+```
+
+Perform predictions:
+
+```{r}
+predicted.values <- as.numeric(predict(model.to.save$best.model,
+      newdata = pretreated.val.mx, ncomp = best.ncomp))
+```
+
+Assess:
+
+```{r}
+spectacles::postResampleSpectro(pred = predicted.values, obs = pretreated.val$reference)
+```
+
+Plot predictions:
+
+```{r}
+overall.range <- c(min(c(pretreated.val$reference, predicted.values)),
+                   max(c(pretreated.val$reference, predicted.values)))
+cbind(unique.id = pretreated.val$unique.id, 
+      observed = pretreated.val$reference, 
+      predicted = predicted.values) %>% 
+  as_tibble() %>% 
+  mutate(observed = as.numeric(observed),
+         predicted = as.numeric(predicted)) %>% 
+  ggplot(aes(x = observed, y = predicted)) + 
+  geom_abline(intercept = 0,
+              slope = 1,
+              color = "gray80") +
+  geom_point() +
+  coord_fixed(xlim = overall.range,
+                  ylim = overall.range) + 
+  labs(title = "Example dry matter content predictions",
+       x = "Observed",
+       y = "Predicted") + 
+  theme_bw()
+```
+# Using new data to make predictions
+
+We don't have DM values for a set of cassava genotypes, must predict using spectra values.
+
+```{r}
+#read in new dataset
+unphenotyped_NIRS <- read.csv("unphenotyped_NIRS.csv")
+
+#pretreat values with best pretreatment
+pretreated.test <- unphenotyped_NIRS[,-1] %>% 
+  pretreat_spectra(pretreatment = 8) 
+
+#format matrix
+pretreated.test.mx <- pretreated.test %>% 
+  dplyr::select(starts_with("X")) %>% 
+  as.matrix()
+
+#obtain predicted DMC values with best fit model and format data.frame
+predicted.values <- as.numeric(predict(model.to.save$best.model,
+      newdata = pretreated.test.mx, ncomp = best.ncomp)) %>% 
+  cbind("sample.id" = unphenotyped_NIRS$sample.id, "DM_predictions" = .) %>% as.data.frame()
+predicted.values$DM_predictions <- as.numeric(predicted.values$DM_predictions)
+
+#plot predicted DMC
+ggplot(predicted.values, aes(x = DM_predictions)) +  geom_histogram(bins =50) +
+    labs(title = "Example dry matter content predictions of unobserved samples",
+       x = "Dry Matter Content",
+       y = "Frequency")
+```
+
+
+```{r}
+#get top 5 percent
+top_5_percent <- predicted.values %>%
+  arrange(desc(DM_predictions)) %>%
+  slice_head(prop = 0.05)
+
+print(top_5_percent)
+
+```
+
+
